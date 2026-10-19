@@ -220,3 +220,12 @@ __marimo__/
 .streamlit/secrets.toml
 
 .idea
+
+# Cloudflare / wrangler
+node_modules/
+.wrangler/
+.dev.vars*
+!.dev.vars.example
+python_modules/
+.venv-workers/
+src/vendor/

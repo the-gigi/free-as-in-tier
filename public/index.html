@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Free Tier Tracker</title>
+<style>
+  :root { --bg:#0a0612; --panel:#140c24; --line:#2c1d4a; --cyan:#3ef0ff; --pink:#ff3ea5; --amber:#ffb13e; --text:#e6e1f5; --dim:#8b80a8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background: radial-gradient(1200px 600px at 50% -200px, #2a0f4a 0%, var(--bg) 60%); color:var(--text);
+         font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; min-height:100vh; }
+  header { padding: 32px 24px 8px; text-align:center; }
+  h1 { margin:0; font-size: 34px; letter-spacing: 3px; color: var(--cyan); text-shadow: 0 0 12px var(--cyan), 0 0 32px #0ff6; }
+  h1 span { color: var(--pink); text-shadow: 0 0 12px var(--pink); }
+  header p { color: var(--dim); margin: 6px 0 0; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px 24px 48px; display:grid; gap:18px; grid-template-columns: 2fr 1fr; }
+  section { background: var(--panel); border:1px solid var(--line); border-radius: 10px; padding: 16px; box-shadow: 0 0 24px #ff3ea511 inset; }
+  h2 { margin: 0 0 12px; font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--pink); }
+  .wide { grid-column: 1 / -1; }
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: normal; }
+  td.limit { color: var(--cyan); white-space: nowrap; }
+  input { width:100%; padding:10px 12px; background:#0c0718; border:1px solid var(--line); color:var(--text); border-radius:6px; font: inherit; }
+  input:focus { outline:none; border-color: var(--cyan); box-shadow: 0 0 10px #3ef0ff55; }
+  .muted { color: var(--dim); }
+  .feed { max-height: 360px; overflow:auto; font-size: 12px; }
+  .feed div { padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  .ok { color: var(--cyan); } .warn { color: var(--amber); } .bad { color: var(--pink); }
+  .pill { display:inline-block; padding: 1px 8px; border:1px solid var(--line); border-radius: 99px; font-size: 11px; color: var(--dim); }
+  a { color: var(--cyan); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>FREE<span>/</span>TIER<span>/</span>TRACKER</h1>
+  <p>Watches cloud providers' free tiers every week, and runs on one. <span id="live" class="pill">live: connecting</span></p>
+</header>
+<main>
+  <section class="wide">
+    <h2>Search every tracked quota</h2>
+    <input id="q" placeholder="e.g. how many database writes a day can I do for free?" autocomplete="off">
+    <table id="results" style="margin-top:10px"></table>
+  </section>
+
+  <section>
+    <h2 id="quota-title">Cloudflare quotas</h2>
+    <table id="quotas"><tr><td class="muted">loading…</td></tr></table>
+  </section>
+
+  <div style="display:grid; gap:18px; align-content:start">
+    <section>
+      <h2>Pages watched</h2>
+      <div id="pages" class="muted">loading…</div>
+    </section>
+    <section>
+      <h2>Live feed</h2>
+      <div id="feed" class="feed muted">waiting for events…</div>
+    </section>
+    <section>
+      <h2>Recent changes</h2>
+      <div id="changes" class="feed muted">loading…</div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ago = (iso) => iso ? new Date(iso).toLocaleString() : "never";
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+async function loadQuotas() {
+  const rows = await api("/api/quotas?provider=cloudflare");
+  $("quotas").innerHTML = rows.length
+    ? "<tr><th>Service</th><th>Metric</th><th>Limit</th><th>Period</th></tr>" +
+      rows.map((q) => `<tr title="${esc(q.notes)}"><td>${esc(q.service)}</td><td>${esc(q.metric)}</td><td class="limit">${esc(q.limit)}</td><td class="muted">${esc(q.period)}</td></tr>`).join("")
+    : '<tr><td class="muted">Nothing tracked yet. The first weekly run fills this in.</td></tr>';
+}
+
+async function loadPages() {
+  const providers = await api("/api/providers");
+  $("pages").innerHTML = providers.map((p) => p.pages.map((pg) => {
+    const c = pg.last_check;
+    const state = !c ? '<span class="muted">not checked</span>' : c.error ? '<span class="bad">error</span>' : c.changed ? '<span class="warn">changed</span>' : '<span class="ok">unchanged</span>';
+    return `<div><a href="${esc(pg.url)}">${esc(pg.title)}</a> ${state}<br><span class="muted">${ago(c && c.checked_at)}</span></div>`;
+  }).join("")).join("");
+}
+
+async function loadChanges() {
+  const rows = await api("/api/changes");
+  $("changes").innerHTML = rows.length
+    ? rows.map((c) => `<div><span class="${c.kind === "removed" ? "bad" : c.kind === "changed" ? "warn" : "ok"}">${esc(c.kind)}</span> ${esc(c.service)}: ${esc(c.metric)}<br><span class="muted">${esc(c.old_value || "")} → ${esc(c.new_value || "")}</span></div>`).join("")
+    : "No changes recorded yet.";
+}
+
+let timer;
+$("q").addEventListener("input", (e) => {
+  clearTimeout(timer);
+  const q = e.target.value.trim();
+  if (!q) { $("results").innerHTML = ""; return; }
+  timer = setTimeout(async () => {
+    const rows = await api(`/api/search?q=${encodeURIComponent(q)}`);
+    $("results").innerHTML = rows.length
+      ? "<tr><th>Match</th><th>Provider</th><th>Service</th><th>Metric</th><th>Limit</th><th>Period</th></tr>" +
+        rows.map((r) => `<tr><td class="muted">${r.score}</td><td>${esc(r.provider)}</td><td>${esc(r.service)}</td><td>${esc(r.metric)}</td><td class="limit">${esc(r.limit)}</td><td class="muted">${esc(r.period)}</td></tr>`).join("")
+      : '<tr><td class="muted">No matches yet.</td></tr>';
+  }, 350);
+});
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/live`);
+  ws.onopen = () => { $("live").textContent = "live: connected"; $("live").className = "pill ok"; $("feed").innerHTML = ""; };
+  ws.onclose = () => { $("live").textContent = "live: reconnecting"; $("live").className = "pill warn"; setTimeout(connect, 3000); };
+  ws.onmessage = (m) => {
+    if (m.data === "pong") return;
+    const e = JSON.parse(m.data);
+    const line = e.type === "run"
+      ? `<span class="warn">run</span> ${esc(e.run_id)} (${e.pages} pages, ${esc(e.trigger)})`
+      : `<span class="${e.status === "failed" ? "bad" : e.status === "done" ? "ok" : "muted"}">${esc(e.status)}</span> ${esc(e.page_id)}${e.changes && e.changes.length ? ` <span class="warn">${e.changes.length} changed</span>` : ""}`;
+    $("feed").insertAdjacentHTML("afterbegin", `<div>${line}<br><span class="muted">${ago(e.at)}</span></div>`);
+    if (e.status === "done" || e.status === "unchanged") { loadQuotas(); loadPages(); loadChanges(); }
+  };
+}
+
+loadQuotas(); loadPages(); loadChanges(); connect();
+</script>
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 Cloudflare's Free plan is the backbone of a pay-nothing stack: compute, a SQL database, object storage, queues and AI inference, with no credit card and no way to be billed by accident. This page covers what you get, where the limits bite, and how to get set up.
 
-Numbers were taken from Cloudflare's docs on 2026-10-18. They change, so check the linked pages before you design around one.
+Numbers were taken from Cloudflare's docs on 2026-10-18. The [tracker](how-it-works.md) re-reads them every week, and its [live page](https://free-tier-tracker.free-as-in-tier.workers.dev) has the current values. They change, so check the linked pages before you design around one.
 
 ## What you get
 
@@ -20,6 +20,7 @@ Numbers were taken from Cloudflare's docs on 2026-10-18. They change, so check t
 | [Vectorize](https://developers.cloudflare.com/vectorize/) | Vector database | 5 million stored and 30 million queried vector dimensions/month |
 | [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) | Pooled connections to an external Postgres or MySQL | 100,000 queries/day |
 | [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) | Built-in logging | 200,000 log events/day, 3-day retention |
+| [Browser Rendering](https://developers.cloudflare.com/browser-rendering/) | Headless Chrome on Cloudflare's network | 10 minutes of browser time/day, 3 concurrent browsers |
 
 Static asset requests served by Workers are free and unlimited.
 
@@ -28,6 +29,8 @@ Static asset requests served by Workers are free and unlimited.
 Most daily limits (Workers, KV, D1, Hyperdrive) reset at 00:00 UTC.
 
 Going over a limit doesn't produce a bill on the Free plan. It produces failures. A Worker over its daily request quota returns [Error 1027](https://developers.cloudflare.com/workers/platform/limits/#daily-requests), or is bypassed entirely if its route is set to fail open. That's the property that makes this tier safe for side projects: the worst case is an outage, not an invoice.
+
+One service has a catch: **R2 needs a payment method to turn on.** Creating a bucket from the CLI fails with `Please enable R2 through the Cloudflare Dashboard`, and enabling it there goes through a checkout flow that asks for a card, even though usage inside the free allowance isn't charged. Every other service on this page worked on an account with no card at all.
 
 Two limits shape the design more than the rest:
 
@@ -76,6 +79,8 @@ npx wrangler deploy                   # deploy the Worker in the current directo
 - [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), which lists the free quotas for KV, D1, R2, Durable Objects, Queues, Workflows, Vectorize, Hyperdrive and Logs
 - [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)
 - [Pages limits](https://developers.cloudflare.com/pages/platform/limits/)
+- [Browser Rendering pricing](https://developers.cloudflare.com/browser-rendering/platform/pricing/)
+- [R2 get started](https://developers.cloudflare.com/r2/get-started/), for the checkout flow that enables R2
 - [Cloudflare plans](https://www.cloudflare.com/plans/)
 - [freetier.wiki on Cloudflare](https://freetier.wiki/services/cloudflare/), for the sign-up flow and billing risk
 - [Where Cloudflare Zero Trust stops being free (2026)](https://zerometric.net/research/cloudflare-zero-trust-free-plan-limits-2026/)

@@ -1,0 +1,14 @@
+[project]
+name = "free-tier-tracker"
+version = "0.1.0"
+description = "Tracks the free tiers of cloud providers, on Cloudflare's free tier"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["workers-py", "workers-runtime-sdk", "pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

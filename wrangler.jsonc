@@ -1,0 +1,44 @@
+{
+  // Free Tier Tracker: every binding below is on the Workers Free plan.
+  // See docs/how-it-works.md for what each one does.
+  "name": "free-tier-tracker",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["python_workers", "python_workflows"],
+  "observability": { "enabled": true },
+
+  // The UI is static files. Only /api/* runs the Worker, so page loads cost no requests.
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // Weekly check, Mondays 06:00 UTC.
+  "triggers": { "crons": ["0 6 * * 1"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "free-tier-tracker",
+      "database_id": "ba1fb296-5525-4785-a522-584ca8ebd447",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "KV", "id": "64658a33b5fd4b628b27fed7ca2e1f10" }],
+  "queues": {
+    "producers": [{ "binding": "CHECKS", "queue": "free-tier-checks" }],
+    "consumers": [{ "queue": "free-tier-checks", "max_batch_size": 10, "max_retries": 3 }]
+  },
+  "workflows": [{ "name": "free-tier-check", "binding": "CHECK_PAGE", "class_name": "CheckPage" }],
+  "durable_objects": { "bindings": [{ "name": "FEED", "class_name": "LiveFeed" }] },
+  // Durable Objects on the Free plan must use the SQLite storage backend.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveFeed"] }],
+  "ai": { "binding": "AI" },
+  "vectorize": [{ "binding": "VECTORS", "index_name": "free-tier-quotas" }],
+
+  "vars": {
+    "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "EMBED_MODEL": "@cf/baai/bge-base-en-v1.5"
+  }
+}

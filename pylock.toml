@@ -1,0 +1,8 @@
+lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.14.2"
+
+[[packages]]
+name = "workers-runtime-sdk"
+version = "1.9.4"
+wheels = [{ url = "https://perplexity.firewall.socket.dev/pypi/pplx-ai/simple/workers-runtime-sdk/1.9.4/workers_runtime_sdk-1.9.4-py3-none-any.whl", upload-time = 2026-10-16T05:13:19Z, size = 39960, hashes = { md5 = "381210b620c514dc9fbd1bfe79be690f", sha256 = "2bd6f5788fd6fdd38ff677e37c93fd92b37ff3a3ab33b43b7ed84ba50688a647" } }]
