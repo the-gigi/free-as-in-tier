@@ -70,7 +70,7 @@ The last hash for each page is in KV under `hash:<page id>`. If the new hash mat
 
 ### Extraction
 
-For a changed page, the snapshot goes into D1 first, so every extraction has the exact text it was read from. Then the text goes to Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) in JSON mode, with a schema that asks for one object per free-plan limit: service, metric, limit, period and notes. The prompt asks for numbers copied exactly as written, nothing that applies only to paid plans, and nothing without a number.
+For a changed page, the snapshot goes into D1 first, so every extraction has the exact text it was read from. Snapshots are the one thing that would naturally live in R2, Cloudflare's object storage, and the reason they don't is under [Staying free](#staying-free). Then the text goes to Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) in JSON mode, with a schema that asks for one object per free-plan limit: service, metric, limit, period and notes. The prompt asks for numbers copied exactly as written, nothing that applies only to paid plans, and nothing without a number.
 
 Two details came out of testing it against the real pages:
 
@@ -83,7 +83,7 @@ Two details came out of testing it against the real pages:
 
 `quotas.diff` compares the new extraction with the page's active quotas in D1. Quotas are matched on a normalized service and metric, so "Workers KV / keys written" and "workers-kv / Keys Written" are the same quota.
 
-A quota counts as changed when its limit or period changed, compared after normalization. The model varies formatting between runs: R2's Class B allowance came back as "10 million requests" one run and "10 million requests / month" the next, with "per month" as the period both times. `Quota.comparable` drops a period folded into the limit and normalizes spacing and case, and leaves digits and units alone, so a real cut from "10 GB-month" to "5 GB-month" still registers. Notes are ignored entirely, because the model rewords them freely.
+A quota counts as changed when its limit or period changed, compared after normalization. The model varies formatting between runs: R2's Class B (read operations) allowance came back as "10 million requests" one run and "10 million requests / month" the next, with "per month" as the period both times. `Quota.comparable` drops a period folded into the limit and normalizes spacing and case, and leaves digits and units alone, so a real cut from "10 GB-month" to "5 GB-month" still registers. Notes are ignored entirely, because the model rewords them freely.
 
 `store.apply_extraction` writes the whole result as one D1 batch. A changed quota closes the old row (`active = 0`) and opens a new one, so the `quotas` table holds the full history, and every change also gets a row in `changes`.
 
@@ -93,7 +93,21 @@ The first extraction of a page has nothing to compare against, so everything com
 
 Each quota becomes a sentence such as "Cloudflare Workers KV: keys written 1,000 per day", which is embedded with `@cf/baai/bge-base-en-v1.5` (768 dimensions) and upserted into Vectorize under a stable id derived from the provider and quota key. Re-extracting a page overwrites its vectors rather than adding duplicates, and a removed quota's vector is deleted.
 
-`GET /api/search?q=...` embeds the question the same way and returns the ten closest quotas. Results are cached in KV for an hour, so a repeated search costs no model call. The cache key includes an index version that the embed step bumps, so an answer cached before new vectors were indexed is never served after.
+`GET /api/search?q=...` answers in one of two ways, depending on the query:
+
+- **A lookup.** If every word of the query appears as a whole word in a quota's provider, service and metric, the result is exactly those quotas, marked `exact`. A quoted phrase has to appear as consecutive words. "Workers AI" returns the one Workers AI quota and nothing about Workers in general. This costs a D1 read and no model call.
+- **A question.** Anything else ("how many database writes a day?") goes to Vectorize for the 20 nearest quotas, and the extraction model is shown the question with those 20 candidates and returns the ones that answer it, best first. Measured at about 17 neurons a search.
+
+That second layer replaced two simpler designs, and each failed on a measured case:
+
+| Design | What went wrong |
+| --- | --- |
+| The 10 nearest vectors | "Workers AI" returned its one quota followed by nine unrelated Workers limits. Cosine scores sat between 0.63 and 0.74 for relevant and irrelevant rows alike, so there was no threshold to apply |
+| Nearest vectors, then a reranker (`bge-reranker-base`) | Sharp when the question used the page's own words (0.998 for "how long are queue messages kept"), blind when it didn't: R2, Cloudflare's object storage, scored 0.001 for "free object storage", below Durable Objects. The reranker doesn't know what R2 is |
+
+In every test the right answer was among the 20 candidates. What was missing was knowledge of the products, and the model has it.
+
+Questions spend neurons, so they're capped at 150 uncached searches per UTC day, about 2,500 of the 10,000 daily neurons, with a KV counter. Past the cap, a question gets a 429 saying so, and lookups keep working. Results are cached in KV for an hour, and repeats don't count against the cap. The cache key includes an index version that the embed step bumps, so an answer cached before new vectors were indexed is never served after, and a `SEARCH_CACHE_VERSION` constant to bump whenever search itself changes.
 
 ### Seeing what changed
 
@@ -119,7 +133,7 @@ The UI is a static `public/index.html` served as a Workers static asset. `run_wo
 | `GET /api/quotas?provider=cloudflare` | The provider's active quotas |
 | `GET /api/changes` | The 50 most recent changes |
 | `GET /api/runs` | The 10 most recent runs, with each page's result |
-| `GET /api/search?q=...` | The ten quotas closest to the question |
+| `GET /api/search?q=...` | Quotas named by the query, or the ones a model picks as answering it |
 | `GET /api/live` | WebSocket: the live event feed |
 | `POST /api/runs` | Start a run. Needs `Authorization: Bearer <admin token>` |
 
@@ -144,7 +158,7 @@ The schema is in `migrations/`.
 | Workflows | One instance per page | ≤ 8 steps per page | 3,000 steps/day |
 | KV | Page hashes, search cache | ~10 reads, ≤ 7 writes | 100,000 reads, 1,000 writes/day |
 | D1 | Everything durable | A few hundred rows written | 100,000 rows written/day, 5 GB |
-| Workers AI | Extraction and embeddings | 0 for unchanged pages, ~1,100 neurons if all five change | 10,000 neurons/day |
+| Workers AI | Extraction, embeddings, question search | 0 for unchanged pages, ~1,100 neurons if all five change, plus ~17 per question searched | 10,000 neurons/day |
 | Vectorize | Search | ~60 vectors of 768 dimensions | 5M stored dimensions |
 | Durable Objects | Live feed | A few dozen requests | 100,000 requests/day |
 
@@ -162,6 +176,7 @@ These came from real runs on 2026-10-19, read from `wrangler tail` and the model
 | Wall time per page check | 5 to 21 seconds, almost all of it the model |
 | CPU per workflow invocation | 80 to 338 ms |
 | CPU per API request | 5 to 31 ms |
+| Neurons per question search | ~17 (20 candidates, ~570 prompt tokens) |
 | Worker startup time | 453 ms (Python, measured at deploy) |
 
 The CPU numbers are worth knowing. The Workers Free plan lists 10 ms of CPU per invocation, and the workflow invocations used up to 338 ms and still completed with outcome `ok`. That's what happened here, not a promise: if those invocations start failing, CPU is the first suspect, and the Python runtime is the likeliest cost.
@@ -206,6 +221,7 @@ Add a `Provider` with its pages to `src/tracker/providers.py` and deploy. The ne
 | `src/tracker/providers.py` | The pages being watched |
 | `src/tracker/text.py` | Normalizing, hashing and chunking page text |
 | `src/tracker/quotas.py` | Extraction prompt and schema, parsing, merging, diffing |
+| `src/tracker/search.py` | Keyword matching and the search model's prompt and parsing |
 | `src/tracker/store.py` | D1 queries |
 | `migrations/` | D1 schema |
 | `public/` | The UI |

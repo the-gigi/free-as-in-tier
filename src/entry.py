@@ -23,6 +23,7 @@ from workers.workflows import NonRetryableError
 
 from tracker import store
 from tracker.providers import PROVIDERS, all_pages, find_page, find_provider
+from tracker.search import JUDGE_SCHEMA, build_judge_messages, keyword_matches, parse_judge
 from tracker.quotas import (
     EXTRACTION_SCHEMA,
     Quota,
@@ -36,6 +37,16 @@ from tracker.quotas import (
 from tracker.text import chunks, clip, content_hash, normalize
 
 SEARCH_CACHE_TTL = 3600  # seconds; KV's minimum is 60
+# Bump when search changes how it answers. Cached answers from the old logic otherwise
+# outlive the deploy that replaced it: a "Workers AI" search kept returning ten rows of
+# plain vector matches for an hour after keyword lookup shipped.
+SEARCH_CACHE_VERSION = "2"
+SEARCH_CANDIDATES = 20
+SEARCH_LIMIT = 10
+# Uncached model searches allowed per UTC day. Measured at ~17 neurons each, 150 is about
+# 2,500 of the 10,000 daily neurons, which leaves a forced run of every page (~1,100)
+# plenty of room even on a busy day. Cached repeats don't count.
+SEARCH_DAILY_CAP = 150
 FEED_NAME = "feed"
 
 
@@ -98,7 +109,7 @@ class Default(WorkerEntrypoint):
             if path == "/api/runs" and request.method == "POST":
                 return await self.trigger(request)
             if path == "/api/search" and request.method == "GET":
-                return await self.search(query.get("q", "").strip())
+                return await self.search(query.get("q", "").strip(), debug=query.get("debug") == "1")
             return json_response({"error": "not found"}, 404)
         except Exception as exc:  # noqa: BLE001
             print(f"error on {request.method} {url.path}: {exc!r}")
@@ -168,22 +179,78 @@ class Default(WorkerEntrypoint):
         result = await start_run(self.env, "manual", body.get("pages"), bool(body.get("force")))
         return json_response(result, 202)
 
-    async def search(self, q: str):
+    async def search(self, q: str, debug: bool = False):
         if not q:
             return json_response({"error": "missing q"}, 400)
         # The index version is bumped whenever vectors change, so new quotas never sit
         # behind an answer cached before they were indexed.
         version = await self.env.KV.get("search:version") or "0"
-        cache_key = f"search:{version}:{content_hash(q.lower())[:32]}"
-        cached = await self.env.KV.get(cache_key)
-        if cached:
-            return Response(cached, headers={"content-type": "application/json", "x-cache": "hit"})
-        embedded = await self.env.AI.run(env_get(self.env, "EMBED_MODEL"), {"text": [q]})
-        result = await self.env.VECTORS.query(embedded["data"][0], {"topK": 10, "returnMetadata": "all"})
-        matches = [{"score": round(m["score"], 3), **(m.get("metadata") or {})} for m in result.get("matches") or []]
-        payload = json.dumps(matches)
-        await self.env.KV.put(cache_key, payload, {"expirationTtl": SEARCH_CACHE_TTL})
+        cache_key = f"search:{SEARCH_CACHE_VERSION}:{version}:{content_hash(q.lower())[:32]}"
+        if not debug:
+            cached = await self.env.KV.get(cache_key)
+            if cached:
+                return Response(cached, headers={"content-type": "application/json", "x-cache": "hit"})
+
+        results = await self.keyword_search(q)
+        if not results:
+            if not await self.take_search_budget():
+                return json_response({"error": "Today's budget for question search is used up. Searching by name (e.g. \"Workers KV\") still works."}, 429)
+            results = await self.semantic_search(q, debug)
+        payload = json.dumps(results)
+        if not debug:
+            await self.env.KV.put(cache_key, payload, {"expirationTtl": SEARCH_CACHE_TTL})
         return Response(payload, headers={"content-type": "application/json", "x-cache": "miss"})
+
+    async def keyword_search(self, q: str) -> list[dict]:
+        """A lookup: every query word names the provider, service or metric."""
+        pages = {pg.id: pg for _, pg in all_pages()}
+        names = {p.id: p.name for p in PROVIDERS}
+        rows = [
+            {
+                "provider": names.get(r["provider"], r["provider"]),
+                "service": r["service"],
+                "metric": r["metric"],
+                "limit": r["limit_value"],
+                "period": r["period"],
+                "page": pages[r["page_id"]].title if r["page_id"] in pages else r["page_id"],
+                "url": pages[r["page_id"]].url if r["page_id"] in pages else "",
+            }
+            for r in await store.all_active_quotas(self.env.DB)
+        ]
+        return [{**r, "score": "exact"} for r in keyword_matches(q, rows)]
+
+    async def take_search_budget(self) -> bool:
+        """A KV counter per UTC day. KV isn't atomic, so concurrent searches can overshoot
+        the cap by a few. That's fine for a budget, and it costs one KV write per search."""
+        key = f"search:budget:{datetime.now(timezone.utc):%Y-%m-%d}"
+        used = int(await self.env.KV.get(key) or "0")
+        if used >= SEARCH_DAILY_CAP:
+            return False
+        await self.env.KV.put(key, str(used + 1), {"expirationTtl": 2 * 86400})
+        return True
+
+    async def semantic_search(self, q: str, debug: bool) -> list[dict]:
+        """A question: Vectorize finds candidates, the model decides which answer it."""
+        embedded = await self.env.AI.run(env_get(self.env, "EMBED_MODEL"), {"text": [q]})
+        found = await self.env.VECTORS.query(embedded["data"][0], {"topK": SEARCH_CANDIDATES, "returnMetadata": "all"})
+        candidates = [dict(m.get("metadata") or {}) for m in found.get("matches") or []]
+        if not candidates:
+            return []
+        judged = await self.env.AI.run(
+            env_get(self.env, "SEARCH_MODEL") or env_get(self.env, "AI_MODEL"),
+            {
+                "messages": build_judge_messages(q, candidates),
+                "response_format": {"type": "json_schema", "json_schema": JUDGE_SCHEMA},
+                "max_tokens": 256,
+                "temperature": 0,
+            },
+        )
+        picked = parse_judge(judged, len(candidates))
+        print(f"search {q!r}: picked {picked} of {len(candidates)}, usage {judged.get('usage')}")
+        results = [{**candidates[i], "score": rank + 1} for rank, i in enumerate(picked[:SEARCH_LIMIT])]
+        if debug:
+            results.append({"debug_candidates": [f"[{i}] {c.get('service')}: {c.get('metric')}" for i, c in enumerate(candidates)], "usage": judged.get("usage")})
+        return results
 
 
 RETRY = {"retries": {"limit": 3, "delay": "30 seconds", "backoff": "exponential"}, "timeout": "5 minutes"}
@@ -287,7 +354,7 @@ class CheckPage(WorkflowEntrypoint):
                         {
                             "id": vector_id(provider.id, q),
                             "values": list(vec),
-                            "metadata": {"provider": provider.name, "service": q.service, "metric": q.metric, "limit": q.limit, "period": q.period, "page": page.title, "url": page.url},
+                            "metadata": {"provider": provider.name, "service": q.service, "metric": q.metric, "limit": q.limit, "period": q.period, "notes": q.notes, "page": page.title, "url": page.url},
                         }
                         for q, vec in zip(quotas, vectors)
                     ]

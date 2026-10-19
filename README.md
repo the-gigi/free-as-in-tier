@@ -12,4 +12,4 @@ The first system here watches the free tiers of cloud providers, and runs on one
 
 ## Providers
 
-- [Cloudflare](docs/cloudflare.md): Workers, Pages, D1, KV, R2, Queues, Workers AI and more, no credit card needed
+- [Cloudflare](docs/cloudflare.md): Workers, Pages, D1, KV, Queues, Workers AI and more, with no credit card. R2 is the exception: it needs a card on file to turn on

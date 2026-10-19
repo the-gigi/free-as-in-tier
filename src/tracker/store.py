@@ -37,6 +37,10 @@ async def active_quotas(db, provider: str, page_id: str | None = None) -> list[d
     return _rows(await db.prepare(sql + " ORDER BY service, metric").bind(*args).all())
 
 
+async def all_active_quotas(db) -> list[dict]:
+    return _rows(await db.prepare("SELECT * FROM quotas WHERE active = 1 ORDER BY provider, service, metric").all())
+
+
 def row_to_quota(row: dict) -> Quota:
     return Quota(row["service"], row["metric"], row["limit_value"], row["period"], row.get("notes") or "")
 
